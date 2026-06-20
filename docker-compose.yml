@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: notif_user
+      POSTGRES_PASSWORD: notif_pass
+      POSTGRES_DB: notifications
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notif_user -d notifications"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://notif_user:notif_pass@postgres:5432/notifications
+      QUEUE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_PER_HOUR: 100
+      MAX_RETRIES: 3
+      RETRY_BASE_DELAY_SECONDS: 5
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python -m app.workers.notification_worker
+    environment:
+      DATABASE_URL: postgresql://notif_user:notif_pass@postgres:5432/notifications
+      QUEUE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      MAX_RETRIES: 3
+      RETRY_BASE_DELAY_SECONDS: 5
+      WORKER_POLL_INTERVAL: 0.5
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

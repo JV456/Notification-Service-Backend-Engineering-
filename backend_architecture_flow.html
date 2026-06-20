@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notification Service: Backend Flow</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .mermaid {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="mermaid">
+sequenceDiagram
+    participant Client
+    participant API as FastAPI
+    participant Limiter as RateLimiter
+    participant DB as Database (SQLAlchemy)
+    participant Queue as Task Queue
+    participant Worker as Background Worker
+    participant Provider as Mock Providers (Email/SMS/Push)
+
+    Client->>API: POST /notifications (payload)
+    
+    %% Rate Limiting Step
+    API->>Limiter: Check rate limit for user_id
+    alt Limit Exceeded
+        Limiter-->>API: Blocked
+        API-->>Client: 429 Too Many Requests
+    else Allowed
+        Limiter-->>API: Allowed
+        
+        %% Idempotency Check Step
+        API->>DB: Check idempotency_key
+        alt Duplicate Key
+            DB-->>API: Return Existing Notification
+            API-->>Client: 201 Created (Idempotent Replay)
+        else New Key
+            
+            %% Template Processing
+            opt template_id provided
+                API->>DB: Fetch Template
+                DB-->>API: Template Data
+                API->>API: Render Body/Subject with variables
+            end
+            
+            %% User Preferences
+            API->>DB: Fetch User Preferences
+            DB-->>API: Enabled Channels (email, sms, push)
+            
+            %% Persistence & Queuing
+            API->>DB: Create Notification & Deliveries (status: queued/skipped)
+            
+            loop For each requested & enabled channel
+                API->>Queue: enqueue(priority, job_data)
+            end
+            
+            DB-->>API: Notification created (status: processing)
+            API-->>Client: 201 Created (Notification Details)
+        end
+    end
+
+    %% Asynchronous Background Processing
+    loop Continuous Queue Polling
+        Worker->>Queue: dequeue()
+        Queue-->>Worker: job_data
+        
+        Worker->>Provider: Send message via channel provider
+        
+        alt Success
+            Provider-->>Worker: 200 OK
+            Worker->>DB: Update DeliveryStatus to 'sent'
+        else Failure
+            Provider-->>Worker: Error
+            Worker->>DB: Update DeliveryStatus to 'failed'
+            
+            %% Retry logic
+            opt Retries Remaining > 0
+                Worker->>Queue: Re-enqueue with exponential backoff delay
+                Worker->>DB: Update DeliveryStatus to 'retrying'
+            end
+        end
+        
+        %% Final Status check
+        Worker->>DB: Update overall NotificationStatus if all deliveries complete
+    end
+    </div>
+
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
