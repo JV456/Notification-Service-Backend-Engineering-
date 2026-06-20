@@ -184,14 +184,3 @@ curl -X POST http://localhost:8000/notifications \
   only distinguishes pending/queued/sent/failed/skipped. A real provider
   integration would add webhook-driven "delivered" confirmation (see Bonus
   Points / future work in DESIGN.md).
-
-## What's implemented vs. deferred
-
-Implemented: multi-channel delivery, preferences, priority queues, templates,
-delivery tracking, retry/backoff, idempotency, rate limiting, batch API,
-analytics endpoint, structured JSON logging, Docker Compose.
-
-Deferred (noted as a trade-off, not an oversight — see DESIGN.md): webhook
-support for delivery-status callbacks, circuit breaker around provider calls,
-and Kubernetes manifests. These are flagged in DESIGN.md with a rationale for
-why they were scoped out given the assignment's 4–6 hour estimate.
