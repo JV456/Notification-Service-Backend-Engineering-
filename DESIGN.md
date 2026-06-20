@@ -95,3 +95,9 @@ namespace of keys.
 | Polling worker loop (not Redis `BLPOP` blocking pop) | Slightly less efficient than blocking reads; adds up to `WORKER_POLL_INTERVAL` (0.5s) latency when idle | Keeps the in-memory and Redis backends behind the *exact same* interface (`dequeue()` returns `None` rather than blocking), which was worth more than the latency cost for a demo of this scope. A production version would use blocking pops or a pub/sub wakeup. |
 | No webhook support / circuit breaker / k8s manifests (bonus items) | Those bonus features aren't implemented | Given the 4–6 hour estimate, time was spent making the *required* features (retry, idempotency, rate limiting, priority, preferences) solid and well-tested rather than partially implementing every bonus. Webhooks and a circuit breaker are natural next additions; the queue/provider abstractions are already shaped to make both easy to slot in later. |
 | Status rollup computed eagerly after each delivery update | Slightly more DB writes than computing it lazily on read | Makes `GET /notifications/:id` a single cheap read with no aggregation query, which matters more given that endpoint is likely read far more often than deliveries are written. |
+
+
+
+## Use .env 
+
+![alt text](image-2.png)
