@@ -1,0 +1,197 @@
+# Notification Service
+
+A backend service that sends notifications to users across **Email, SMS, and
+Push** channels. Built for the "Backend Engineering Assignment: Notification
+Service" brief — multi-channel delivery, user preferences, priority levels,
+templates, delivery tracking, retries with backoff, idempotency, and rate
+limiting.
+
+## Tech stack & rationale
+
+| Piece | Choice | Why |
+|---|---|---|
+| Web framework | **FastAPI** | Async-capable, validates requests via Pydantic automatically, and generates OpenAPI/Swagger docs for free — directly satisfies the "API documentation" requirement with zero extra work. |
+| ORM / DB | **SQLAlchemy** + SQLite (dev) / **PostgreSQL** (docker-compose, prod) | SQLAlchemy makes swapping SQLite → Postgres a one-line `DATABASE_URL` change, so local dev needs no services running at all, while the "real" deployment target is Postgres as the assignment prefers. |
+| Queue | **In-memory** (dev/tests) / **Redis** (docker-compose, prod) | Same idea: zero-dependency by default, durable and multi-worker-safe when you flip `QUEUE_BACKEND=redis`. |
+| Providers | **Mocked** (`app/providers/mock_providers.py`) | The assignment explicitly asks to mock email/SMS/push and focus on service design, not third-party SDKs. |
+| Tests | **pytest** + FastAPI's `TestClient` | Standard, fast, no extra infra needed (tests run entirely against SQLite + the in-memory queue). |
+
+## Project structure
+
+```
+app/
+  main.py                  # FastAPI app: routes, startup, error handling
+  config.py                # All settings, read from env vars
+  database.py              # SQLAlchemy engine/session
+  models.py                # ORM models (the DB schema)
+  schemas.py                # Pydantic request/response shapes
+  api/
+    notifications.py       # POST/GET /notifications, batch, history
+    preferences.py          # GET/POST /users/:id/preferences
+    analytics.py            # GET /analytics/stats (bonus)
+    templates.py            # POST/GET /templates
+  services/
+    notification_service.py # Core business logic: validate, persist, enqueue
+    template_service.py     # {{variable}} substitution
+    rate_limiter.py          # Per-user fixed-window limiter (memory + Redis)
+  queue/
+    base.py / memory.py / redis_queue.py / factory.py   # Pluggable queue backends
+  providers/
+    mock_providers.py        # Simulated email/SMS/push gateways
+  workers/
+    notification_worker.py  # Background process: send + retry/backoff
+  core/
+    logging_config.py        # Structured JSON logging
+tests/
+  unit/                      # Pure logic: templates, rate limiter, queue, worker
+  integration/                # Full HTTP request/response against the API
+```
+
+## Setup instructions (local development)
+
+Requires Python 3.10+.
+
+```bash
+cd notification-service
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env            # defaults work out of the box (SQLite + in-memory queue)
+```
+
+**Run the API:**
+
+```bash
+uvicorn app.main:app --reload
+```
+
+The API is now at `http://localhost:8000`. Interactive docs (Swagger UI) are
+at `http://localhost:8000/docs`; the raw OpenAPI spec at `/openapi.json`.
+
+**Run the background worker** (in a second terminal — this is what actually
+"sends" notifications and retries failures):
+
+```bash
+python -m app.workers.notification_worker
+```
+
+> With the default `QUEUE_BACKEND=memory`, the queue lives inside whichever
+> process created it. Since the API process enqueues jobs but only the worker
+> process dequeues them, **you must run both API and worker in the same
+> process** for the in-memory backend to work end-to-end locally without
+> Redis — or switch to `QUEUE_BACKEND=redis` and run them as separate
+> processes (see Docker section below, which does exactly that).
+
+## Running with Docker (recommended way to see it all work together)
+
+```bash
+docker-compose up --build
+```
+
+This starts Postgres, Redis, the API (port 8000), and the worker — all
+correctly wired with `QUEUE_BACKEND=redis`, so the API and worker are
+separate processes communicating through Redis, exactly like a real
+deployment.
+
+## Running tests
+
+```bash
+pytest
+```
+
+Tests run against an isolated SQLite file (`test.db`, auto-created/destroyed)
+and the in-memory queue — no Docker or external services required. Coverage:
+
+```bash
+pytest --cov=app --cov-report=term-missing
+```
+
+- **Unit tests** (`tests/unit/`): template rendering, rate limiter behavior,
+  queue priority ordering and delayed retries, worker job processing
+  (success / retry / permanent failure) — all mocking the provider layer.
+- **Integration tests** (`tests/integration/`): every API endpoint, including
+  validation errors, 404s, idempotency replay, preference filtering, rate
+  limit enforcement (429), and template-driven sends.
+
+## API documentation
+
+Full interactive docs are auto-generated by FastAPI at `/docs` once the
+server is running. Summary of endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/notifications` | Send a notification (one or more channels) |
+| POST | `/notifications/batch` | Send the same message to many users (bonus) |
+| GET | `/notifications/{id}` | Get a notification's status + per-channel deliveries |
+| GET | `/users/{user_id}/notifications` | Paginated notification history |
+| POST | `/users/{user_id}/preferences` | Set channel opt-in/opt-out |
+| GET | `/users/{user_id}/preferences` | Get channel preferences |
+| POST | `/templates` | Create a reusable `{{variable}}` template |
+| GET | `/templates/{id}` | Fetch a template |
+| GET | `/analytics/stats` | Sent/failed counts by channel (bonus) |
+| GET | `/health` | Liveness probe + current queue depth |
+
+### Example: send a notification
+
+```bash
+curl -X POST http://localhost:8000/notifications \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user-123",
+    "channels": ["email", "sms"],
+    "priority": "high",
+    "body": "Your order has shipped!",
+    "idempotency_key": "order-456-shipped"
+  }'
+```
+
+### Example: using a template
+
+```bash
+curl -X POST http://localhost:8000/templates \
+  -H "Content-Type: application/json" \
+  -d '{"name": "order_shipped", "body_template": "Hi {{name}}, order {{order_id}} has shipped!"}'
+
+curl -X POST http://localhost:8000/notifications \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user-123",
+    "channels": ["email"],
+    "template_id": "<id-from-previous-response>",
+    "variables": {"name": "Asha", "order_id": "789"}
+  }'
+```
+
+## Assumptions
+
+- **Authentication/authorization** is out of scope, per the assignment's own
+  suggested assumption — assumed to be handled by an API gateway upstream.
+- **User contact info** (email address, phone number, device token) is
+  assumed to live in a separate user-profile service. This service only
+  stores `user_id` and passes it to the mocked provider as the "recipient" —
+  a real implementation would look up the actual address/number/token first.
+- **Idempotency key** is a client-supplied field in the request body
+  (`idempotency_key`), scoped per-user rather than globally, so two different
+  users can reuse the same key independently.
+- **Templates** are stored in the database via a small CRUD API
+  (`POST /templates`) rather than in-memory, since the assignment leaves this
+  open and DB-backed templates survive a restart.
+- **Rate limiting** is a simple fixed-window counter (e.g. resets exactly on
+  the hour boundary, not a rolling window) — simpler to implement and reason
+  about, and within the assignment's "max 100/hour" framing a fixed window is
+  an acceptable trade-off (see DESIGN.md for the rolling-window alternative).
+- **"Delivered" vs "Sent"**: since providers are mocked, this implementation
+  only distinguishes pending/queued/sent/failed/skipped. A real provider
+  integration would add webhook-driven "delivered" confirmation (see Bonus
+  Points / future work in DESIGN.md).
+
+## What's implemented vs. deferred
+
+Implemented: multi-channel delivery, preferences, priority queues, templates,
+delivery tracking, retry/backoff, idempotency, rate limiting, batch API,
+analytics endpoint, structured JSON logging, Docker Compose.
+
+Deferred (noted as a trade-off, not an oversight — see DESIGN.md): webhook
+support for delivery-status callbacks, circuit breaker around provider calls,
+and Kubernetes manifests. These are flagged in DESIGN.md with a rationale for
+why they were scoped out given the assignment's 4–6 hour estimate.
